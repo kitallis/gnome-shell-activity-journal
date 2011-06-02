@@ -21,27 +21,22 @@
  */
 
 const Clutter = imports.gi.Clutter;
+const Main = imports.ui.main;
 const GLib = imports.gi.GLib;
-const Gio = imports.gi.Gio;
 const Gtk = imports.gi.Gtk;
 const Shell = imports.gi.Shell;
 const Lang = imports.lang;
 const Signals = imports.signals;
 const St = imports.gi.St;
 const Mainloop = imports.mainloop;
-const Gettext = imports.gettext.domain('gnome-shell-extensions');
+const Gettext = imports.gettext.domain('gnome-shell');
 const _ = Gettext.gettext;
 const C_ = Gettext.pgettext;
 
-const FileUtils = imports.misc.fileUtils;
-const Calendar = imports.ui.calendar;
-const DocInfo = imports.misc.docInfo;
 const IconGrid = imports.ui.iconGrid;
-const PopupMenu = imports.ui.popupMenu;
-const ViewSelector = imports.ui.viewSelector;
-const Main = imports.ui.main;
 const Zeitgeist = imports.misc.zeitgeist;
-const Util = imports.misc.util;
+const DocInfo = imports.misc.docInfo;
+const Semantic = imports.misc.semantic;
 
 
 //*** JournalLayout ***
@@ -71,98 +66,108 @@ const Util = imports.misc.util;
 //   - appendNewline () - Adds a newline after the last item, and moves the layout cursor
 //     to the leftmost column in the view.  The vertical space between rows comes from
 //     the "row-spacing" CSS attribute within the "journal" style class.
-
-function JournalLayout () {
-    this._init ();
+function SubjJournal (label, timerange, template, sorting) {
+    this._init (label, timerange, template, sorting);
 }
 
-JournalLayout.prototype = {
-    _init: function () {
-        this._items = []; // array of { type: "item" / "newline" / "hspace", child: item }
-        this._container = new Shell.GenericContainer ({ style_class: 'journal' });
-
-        this._container.connect ("style-changed", Lang.bind (this, this._styleChanged));
+SubjJournal.prototype = {
+    _init: function (label, timerange, template, sorting) {
+        this._items = [];
+        this._events = [];
+        this._timerange = timerange;
+        this._template = template;
+        this._sorting = sorting;
         this._itemSpacing = 0; // "item-spacing" attribute
         this._rowSpacing = 0;  // "row-spacing" attribute
-
-        // We pack the Shell.GenericContainer inside a box so that it will be scrollable.
-        // Shell.GenericContainer doesn't implement the StScrollable interface,
-        // but St.BoxLayout does.
-        let box = new St.BoxLayout({ vertical: true });
-        box.add (this._container, { y_align: St.Align.START, expand: true });
-
-        this.actor = box;
-
+        this._container = new Shell.GenericContainer ({ style_class: 'journal' });
+        this._container.connect ("style-changed", Lang.bind (this, this._styleChanged));
         this._container.connect ("allocate", Lang.bind (this, this._allocate));
         this._container.connect ("get-preferred-width", Lang.bind (this, this._getPreferredWidth));
         this._container.connect ("get-preferred-height", Lang.bind (this, this._getPreferredHeight));
+        //this._container.add_actor(label.actor);
+        this.actor = this._container;
+        this._label = label;
+        var heading = new HeadingItem(label);
+        this.appendItem (heading);
+        this.appendNewline();
+        var heading = new HeadingItem(" ");
+        this.appendItem (heading);
+        this.appendNewline();
+        this.actor.hide()
+        Zeitgeist.findEvents (this._timerange,                        // time_range
+                              [template],                                   // event_templates
+                              Zeitgeist.StorageState.ANY,                // storage_state - FIXME: should we use AVAILABLE instead?
+                              0,                                         // num_events - 0 for "as many as you can"
+                              sorting, // result_type
+                              Lang.bind (this, this._appendEvents));
     },
-
-    // We only expect items to have an item.actor field, which is a ClutterActor
-    appendItem: function (item) {
-        if (!item)
-            throw new Error ("item must not be null");
-
-        if (!item.actor)
-            throw new Error ("Item must already contain an actor when added to the JournalLayout");
-
-        let i = { type: "item",
-                  child: item };
-
-        this._items.push (i);
-        this._container.add_actor (item.actor);
-    },
-
-    appendNewline: function () {
-        let i = { type: "newline" }
-        this._items.push (i);
-    },
-
-    appendHSpace: function () {
-        let i = { type: "hspace" };
-        this._items.push (i);
-    },
-
-    clear: function () {
-        this._items = [];
-        this._container.destroy_children ();
-    },
-
+    
+    _appendEvents: function(events){
+        this.actor.hide();
+        this._events = events;
+        var inserted = 0;
+        log ("got " + events.length + " events");
+        for (let i = 0; i < events.length; i++) {
+            let e = events[i];
+            let subject = e.subjects[0];
+            let uri = subject.uri.replace('file://', '');
+            uri = GLib.uri_unescape_string(uri, '');
+            if (GLib.file_test(uri, GLib.FileTest.EXISTS) || subject.origin.indexOf("Telepathy") != -1) {
+                if (inserted < 5) {
+                    let d = new Date (e.timestamp);
+                    last_timestamp = e.timestamp;
+                    let item = new EventItem (e);
+                    this.appendItem (item);
+                    this.appendHSpace ();
+                }
+                inserted = inserted +1;
+            }
+            if (inserted > 5)
+                break;
+        }
+        if (inserted > 0)
+            this.actor.show();
+        if (inserted > 5){
+            // FIXME: Show a more button to expand the view
+        }
+        
+        this.appendNewline();
+        var heading = new HeadingItem(" ");
+        this.appendItem (heading);
+        this.appendNewline();
+        var heading = new HeadingItem(" ");
+        this.appendItem (heading);
+   },
+    
     _styleChanged: function () {
         log ("JournalLayout: _styleChanged()");
-        let node = this._container.get_theme_node ();
+        for (var key in this._containers)
+        {
+            let node = this._containers[key].get_theme_node ();
 
-        this._itemSpacing = node.get_length ("item-spacing");
-        this._rowSpacing = node.get_length ("row-spacing");
+            this._itemSpacing = node.get_length ("item-spacing");
+            this._rowSpacing = node.get_length ("row-spacing");
 
-        this._container.queue_relayout ();
+            this._containers[key].queue_relayout ();
+        }
     },
-
+    
     _allocate: function (actor, box, flags) {
         let width = box.x2 - box.x1;
         this._computeLayout (width, true, flags);
     },
-
+    
     _getPreferredWidth: function (actor, forHeight, alloc) {
         alloc.min_size = 128; // FIXME: get the icon size from CSS
         alloc.natural_size = (48 + this._itemSpacing) * 4 - this._itemSpacing; // four horizontal icons and the spacing between them
     },
 
     _getPreferredHeight: function (actor, forWidth, alloc) {
-        let height = this._computeLayout (forWidth, false, null);
-
+        let height = this._computeLayout (forWidth, true, null);
         alloc.min_size = height;
         alloc.natural_size = height;
     },
 
-    // Computes the layout of the items in the journal, based on the available_width.
-    //
-    // do_allocation is a boolean: if false, only the layout will be computed;
-    // if true, the layout will be computed and the items in the journal will
-    // be allocated as well by calling their item.allocate() method.  The former
-    // is for doing size requisition; the latter is for doing size allocation.
-    //
-    // Returns: an integer with the resulting height after layout
     _computeLayout: function (available_width, do_allocation, allocate_flags) {
         let layout_state = { newline_goal_column: 0,
                              x: 0,
@@ -215,8 +220,155 @@ JournalLayout.prototype = {
         }
 
         return layout_state.y + layout_state.row_height;
-    }
+    },
+    
+    // We only expect items to have an item.actor field, which is a ClutterActor
+    appendItem: function (item) {
+        if (!item)
+            throw new Error ("item must not be null");
+        if (!item.actor)
+            throw new Error ("Item must already contain an actor when added to the JournalLayout");
+        let i = { type: "item",
+                  child: item };
+        this._items.push (i);
+        this._container.add_actor (item.actor);
+    },
 
+    appendNewline: function () {
+        let i = { type: "newline" }
+        this._items.push (i);
+    },
+
+    appendHSpace: function () {
+        let i = { type: "hspace" };
+        this._items.push (i);
+    },
+}
+
+function JournalLayout () {
+    this._init ();
+}
+
+JournalLayout.prototype = {
+    _init: function () {
+        this._items = []; // array of { type: "item" / "newline" / "hspace", child: item }
+        //this._container = new Shell.GenericContainer ({ style_class: 'journal' });
+
+        //this._container.connect ("style-changed", Lang.bind (this, this._styleChanged));
+        this._itemSpacing = 0; // "item-spacing" attribute
+        this._rowSpacing = 0;  // "row-spacing" attribute
+
+        // We pack the Shell.GenericContainer inside a box so that it will be scrollable.
+        // Shell.GenericContainer doesn't implement the StScrollable interface,
+        // but St.BoxLayout does.
+        this._box = new St.BoxLayout({ vertical: true });
+        this.actor = this._box;
+        //this._container.connect ("allocate", Lang.bind (this, this._allocate));
+        //this._container.connect ("get-preferred-width", Lang.bind (this, this._getPreferredWidth));
+        //this._container.connect ("get-preferred-height", Lang.bind (this, this._getPreferredHeight));
+    },
+
+    _setUpTimeViews: function (timeview, category) {
+        this.clear()
+        var end = new Date().getTime();
+        let template = category.event_template;
+        let offset = category.time_range;
+        let sorting = category.sorting;
+        
+        if (timeview == false) {
+            if (offset > 0)
+                start = end - offset
+            else
+                start = 0
+            template.subjects[0].interpretation = Semantic.NFO_DOCUMENT;
+            this._containers = {"Documents": new SubjJournal ("Documents", [start, end], template, sorting)};
+            this._box.add_actor (this._containers["Documents"].actor, { y_align: St.Align.START, expand: true });
+            
+            template.subjects[0].interpretation = Semantic.NFO_AUDIO;
+            this._containers = {"Music": new SubjJournal ("Music", [start, end], template, sorting)};
+            this._box.add_actor (this._containers["Music"].actor, { y_align: St.Align.START, expand: true });
+            
+            template.subjects[0].interpretation = Semantic.NFO_VIDEO;
+            this._containers = {"Videos": new SubjJournal ("Videos", [start, end], template, sorting)};
+            this._box.add_actor (this._containers["Videos"].actor, { y_align: St.Align.START, expand: true });
+            
+            template.subjects[0].interpretation = Semantic.NFO_IMAGE;
+            this._containers = {"Pictures": new SubjJournal ("Pictures", [start, end], template, sorting)};
+            this._box.add_actor (this._containers["Pictures"].actor, { y_align: St.Align.START, expand: true });
+            
+            let subjects = []
+            var interpretations = [
+                '!' + Semantic.NFO_IMAGE,
+                '!' + Semantic.NFO_DOCUMENT,
+                '!' + Semantic.NFO_VIDEO,
+                '!' + Semantic.NFO_AUDIO,
+                '!' + Semantic.NMM_MUSIC_PIECE];
+            for (let i = 0; i < interpretations.length; i++) {
+                let subject = new Zeitgeist.Subject(template.subjects[0].uri, interpretations[i], '', '', '', '', '');
+                subjects.push(subject);
+            }
+            template = new Zeitgeist.Event("", "", "", subjects, []);
+            this._containers = {"Other": new SubjJournal ("Other", [start, end], template, sorting)};
+            this._box.add_actor (this._containers["Other"].actor, { y_align: St.Align.START, expand: true });
+        }
+        
+        else{
+            var start = end - 86400000
+            this._containers = {"Today": new SubjJournal ("Today", [start, end], template, sorting)};
+            this._box.add_actor (this._containers["Today"].actor, { y_align: St.Align.START, expand: true });
+            
+            end = start
+            start = end - 86400000
+            this._containers = {"Yesterday": new SubjJournal ("Yesterday", [start, end], template, sorting)};
+            this._box.add_actor (this._containers["Yesterday"].actor, { y_align: St.Align.START, expand: true });
+            
+            end = start
+            start = end - 7 * 86400000
+            this._containers = {"This Week": new SubjJournal ("This Week", [start, end], template, sorting)};
+            this._box.add_actor (this._containers["This Week"].actor, { y_align: St.Align.START, expand: true });
+            
+            end = start
+            start = end - 7 * 86400000
+            this._containers = {"Last Week": new SubjJournal ("Last Week", [start, end], template, sorting)};
+            this._box.add_actor (this._containers["Last Week"].actor, { y_align: St.Align.START, expand: true });
+            
+            end = start
+            start = end - 14 * 86400000
+            this._containers = {"This Month": new SubjJournal ("This Month", [start, end], template, sorting)};
+            this._box.add_actor (this._containers["This Month"].actor, { y_align: St.Align.START, expand: true });
+            
+            end = start
+            start = 0
+            this._containers = {"More Past Stuff": new SubjJournal ("More Past Stuff", [start, end], template, sorting)};
+            this._box.add_actor (this._containers["More Past Stuff"].actor, { y_align: St.Align.START, expand: true });
+        }
+    },
+
+    // We only expect items to have an item.actor field, which is a ClutterActor
+    appendItem: function (item) {
+        if (!item)
+            throw new Error ("item must not be null");
+
+        if (!item.actor)
+            throw new Error ("Item must already contain an actor when added to the JournalLayout");
+
+        let i = { type: "item",
+                  child: item };
+
+        this._items.push (i);
+        this._container.add_actor (item.actor);
+    },
+
+
+    clear: function () {
+        this._items = [];
+        for (var key in this._containers)
+        {
+            this._containers[key].actor.destroy_children();
+            this._containers[key].actor.destroy();
+            this.actor.destroy_children();
+        }
+    },
 };
 
 
@@ -235,218 +387,34 @@ EventItem.prototype = {
             throw new Error ("event must not be null");
 
         this._item_info = new DocInfo.ZeitgeistItemInfo (event);
-        this._icon = new IconGrid.BaseIcon (this._item_info.name,
+        if (event.subjects[0].origin.indexOf("/org/freedesktop/Account/Telepathy/") != -1){
+            this._icon = new IconGrid.BaseIcon (this._item_info.name,
                                             { createIcon: Lang.bind (this, function (size) {
                                                   return this._item_info.createIcon (size);
                                               })
                                             });
+        }
+        else{
+            this._icon = new IconGrid.BaseIcon (this._item_info.name,
+                                            { createIcon: Lang.bind (this, function (size) {
+                                                  return this._item_info.createIcon (size);
+                                              })
+                                            });
+        }
         this._button = new St.Button ({ style_class: "journal-item",
                                         reactive: true,
-                                        button_mask: St.ButtonMask.ONE | St.ButtonMask.THREE, // assume button 2 (middle) does nothing
+                                        button_mask: St.ButtonMask.ONE | St.ButtonMask.TWO,
                                         can_focus: true,
                                         x_fill: true,
                                         y_fill: true });
-        this._button.connect ("clicked", Lang.bind (this, this._buttonClicked));
         this.actor = this._button;
 
-        this._button.set_child (this._icon.actor);
-
-        this._menu = null;
-        this._menuManager = new PopupMenu.PopupMenuManager(this);
-    },
-
-    _removeMenuTimeout: function() {
-        if (this._menuTimeoutId > 0) {
-            Mainloop.source_remove(this._menuTimeoutId);
-            this._menuTimeoutId = 0;
-        }
-    },
-
-    // callback for this._button's "clicked" signal
-    _buttonClicked: function (actor, button) {
-        // FIXME: here we should use double-click for launching immediately with the default application,
-        // and single-click with buttons 1 or 3 to bring up a popup menu with actions.  See the TODO
-        // list at the bottom of this file for details.
-		this._removeMenuTimeout();
-		if (button == 1) {
-		  this._item_info.launch ();
-		  return;
-		} else if (button == 3) {
-		  this.popupMenu();
-		  return true;
-		}
-        Main.overview.hide ();
-    },
-
-    popupMenu: function() {
-        this._removeMenuTimeout();
-        this.actor.fake_release();
-
-        if (!this._menu) {
-            this._menu = new ActivityIconMenu(this);
-            this._menu.connect('activate-window', Lang.bind(this, function (menu, window) {
-                this.activateWindow(window);
-            }));
-            this._menu.connect('popup', Lang.bind(this, function (menu, isPoppedUp) {
-                if (!isPoppedUp)
-                    this._onMenuPoppedDown();
-            }));
-            Main.overview.connect('hiding', Lang.bind(this, function () { this._menu.close(); }));
-
-            this._menuManager.addMenu(this._menu);
-        }
-
-        this.actor.set_hover(true);
-        this.actor.show_tooltip();
-        this._menu.popup();
-
-        return false;
-    },
-
-    activateWindow: function(metaWindow) {
-        if (metaWindow) {
-            Main.activateWindow(metaWindow);
-        } else {
+        this._button.set_child (this._icon.actor); 
+        this._button.connect('clicked', Lang.bind(this, function() {
+            this._item_info.launch();
             Main.overview.hide();
-        }
-    },
-
-    _onMenuPoppedDown: function() {
-        this.actor.sync_hover();
-    },
-
-};
-
-
-//*** ActivityIconMenu ***
-//
-//
-//
-function ActivityIconMenu(source) {
-    this._init(source);
-}
-
-ActivityIconMenu.prototype = {
-    __proto__: PopupMenu.PopupMenu.prototype,
-
-    _init: function(source) {
-        let side = St.Side.LEFT;
-        if (St.Widget.get_default_direction() == St.TextDirection.RTL)
-            side = St.Side.RIGHT;
-
-        PopupMenu.PopupMenu.prototype._init.call(this, source.actor, 0.5, side, 0);
-
-        // We want to keep the item hovered while the menu is up
-        this.blockSourceEvents = true;
-
-        this._source = source;
-		this._subject = this._source._item_info.subject;
-        this.connect('activate', Lang.bind(this, this._onActivate));
-        this.connect('open-state-changed', Lang.bind(this, this._onOpenStateChanged));
-
-        this.actor.add_style_class_name('app-well-menu');
-
-        // Chain our visibility and lifecycle to that of the source
-        source.actor.connect('notify::mapped', Lang.bind(this, function () {
-            if (!source.actor.mapped)
-                this.close();
         }));
-        source.actor.connect('destroy', Lang.bind(this, function () { this.actor.destroy(); }));
-
-        Main.uiGroup.add_actor(this.actor);
-    },
-
-    _redisplay: function() {
-        this.removeAll();
-		this._appendOpenWithList();
-        this._showItemInManager = this._appendMenuItem(_("Open in file manager"));
-        this._appendSeparator();
-        this._removeItemFromJournal = this._appendMenuItem(_("Remove from journal"));
-        this._moveFileToTrash = this._appendMenuItem(_("Move to trash"));
-	},
-
-	_appendOpenWithList: function () {
-		let apps = Gio.app_info_get_all_for_type(this._subject.mimetype);
-		for (let i = 0; i < apps.length; i++) {
-			let name = apps[i].get_name();
-			let id = apps[i].get_id();
-			this._appendMenuItem(_("Open with " + name)).connect('activate', Lang.bind(this, 
-				function () {
-					let app = Gio.DesktopAppInfo.new(id); 
-					app.launch_uris([this._source._item_info.subject.uri], null);
-				}));
-		}
-	},
-
-    _appendSeparator: function () {
-        let separator = new PopupMenu.PopupSeparatorMenuItem();
-        this.addMenuItem(separator);
-    },
-
-    _appendMenuItem: function(labelText) {
-        // FIXME: app-well-menu-item style
-        let item = new PopupMenu.PopupMenuItem(labelText);
-        this.addMenuItem(item);
-        return item;
-    },
-
-    popup: function(activatingButton) {
-        this._redisplay();
-        this.open();
-    },
-
-    _onOpenStateChanged: function (menu, open) {
-        if (open) {
-            this.emit('popup', true);
-        } else {
-            this.emit('popup', false);
-        }
-    },
-
-    _onActivate: function (actor, child) {
-        if (child._window) {
-            let metaWindow = child._window;
-            this.emit('activate-window', metaWindow);
-		} else if (child == this._showItemInManager) {
-			// Util.spawn(['nautilus', this._subject.origin]);
-			log(this._subject.origin);
-			Util.spawn(['xdg-open', this._subject.origin]);
-			Main.overview.hide();
-        } else if (child == this._removeItemFromJournal) {
-			this._collectAndDeleteEvents();
-		} else if (child == this._moveFileToTrash) {
-			// FIXME: _collectSubjectEvents should be smart enough in deleting such that 
-			// if restored from Trash, we should get the Event back in the correct place 
-			let uri = this._source._item_info.subject.uri;
-			log("Trashing file: " + uri);
-			try {
-			  let file = Gio.file_new_for_uri(uri);
-			  file.trash(null);
-			} catch(e) {
-			  Util.spawn(['gvfs-trash', uri]);
-			}
-			this._collectAndDeleteEvents();
-		}
-        this.close();
-    },
-
-	_collectAndDeleteEvents: function() {
-		let subject = new Zeitgeist.Subject (this._subject.uri, "", "", 
-											  this._subject.origin, 
-											  this._subject.mimetype, 
-											  this._subject.text, 
-											  this._subject.storage);		  // uri, interpretation, manifestation, origin, mimetype, text, storage
-		let subject_event = new Zeitgeist.Event ("", "", "", [subject], []);  // interpretation, manifestation, actor, subjects, payload
-		Zeitgeist.findEventIds([0, 9999999999999],							  // time_range
-								[subject_event],						      // event_templates
-								Zeitgeist.StorageState.ANY,					  // storage_state - FIXME: should we use AVAILABLE instead?
-								0,											  // num_events - 0 for "as many as you can"
-								0,
-								Lang.bind (this, function (events) {
-											log("Removing events: " + events);
-											Zeitgeist.deleteEvents(events);	
-								}));
-	}
+    }
 };
 
 
@@ -467,7 +435,7 @@ HeadingItem.prototype = {
     }
 };
 
-
+
 //*** Utility functions
 
 function _compareEventsByTimestamp (a, b) {
@@ -479,260 +447,6 @@ function _compareEventsByTimestamp (a, b) {
         return 0;
 }
 
-
-//*** LayoutByTimeBuckets ***
-//
-// This takes events as delivered by a Zeitgeist query, and lays them out in a
-// JournalLayout as a timeline:  newer events first, older events last.
-// Events appear grouped by "Today", "Yesterday", "Last Week", etc.
-
-function LayoutByTimeBuckets () {
-    this._init ();
-}
-
-// A time bucket is a half-open interval [start, end)
-function _makeTimeBucket (_name, _start, _end) {
-    let bucket = { name: _name,
-               start: _start,
-               end: _end };
-    return bucket;
-}
-
-LayoutByTimeBuckets.prototype = {
-    _init: function () {
-        this.time_buckets = [ ];
-        this.layout_done = false;
-    },
-
-    _pushTimeBucket: function (name, start, end) {
-        if (this.time_buckets.length == 0)
-            this.time_buckets.push (_makeTimeBucket (name, start, end));
-        else {
-            if (end != -1)
-                throw new Error ("start timestamp must be -1 when pushing time buckets except for the first one");
-
-            let num_buckets = this.time_buckets.length;
-
-            let oldest_start = this.time_buckets [num_buckets - 1].start;
-            if (start >= oldest_start)
-                throw new Error ("start timestamp must be earlier than the previously-pushed timestamp");
-
-            this.time_buckets.push (_makeTimeBucket (name, start, oldest_start));
-        }
-    },
-
-    _setupTimeBuckets: function () {
-        let now = new Date();
-        let tomorrow = now.getTime () + 86400 * 1000;
-        let tomorrow_start = Calendar._getBeginningOfDay (new Date (tomorrow));
-
-        this._pushTimeBucket (_("Future"), tomorrow_start.getTime (), 9999999999999);
-
-        let today_start = Calendar._getBeginningOfDay (now);
-        this._pushTimeBucket (_("Today"), today_start.getTime (), -1);
-
-        let yesterday = now.getTime () - 86400 * 1000;
-        let yesterday_start = Calendar._getBeginningOfDay (new Date (yesterday));
-        this._pushTimeBucket (_("Yesterday"), yesterday_start.getTime (), -1);
-
-        let last_week = now.getTime () - 7 * 86400 * 1000;
-        let last_week_start = Calendar._getBeginningOfDay (new Date (last_week));
-        this._pushTimeBucket (_("Last week"), last_week_start.getTime (), -1);
-
-        this._pushTimeBucket (_("Older"), 0, -1);
-    },
-
-    _findBucketIndexForTimestamp: function (t) {
-        for (let i = 0; i < this.time_buckets.length; i++) {
-            let b = this.time_buckets[i];
-
-            if (b.start <= t && t < b.end)
-                return i;
-        }
-
-        return -1;
-    },
-
-    // Takes an array of events, straight from a Zeitgeist query callback, and
-    // lays them out in the specified JournalLayout.
-    layoutEvents: function (events, journal_layout) {
-        if (this.layout_done)
-            throw new Error ("LayoutByTimeBuckets.layoutEvents() may only be called once; create a new LayoutByTimeBuckets to do a new layout");
-
-        this._setupTimeBuckets ();
-
-        let old_bucket_index = -1;
-
-        for (let i = 0; i < events.length; i++) {
-            let e = events[i];
-            let t = e.timestamp;
-
-            let bucket_index = this._findBucketIndexForTimestamp (t);
-            if (bucket_index == -1)
-                throw new Error ("No time bucket was found for timestamp " + t);
-
-            if (old_bucket_index != bucket_index) {
-                if (old_bucket_index != -1)
-                    journal_layout.appendNewline (); // i.e. only if this is not the *first* heading in the journal
-
-                let heading = new HeadingItem (this.time_buckets[bucket_index].name);
-
-                journal_layout.appendItem (heading);
-                journal_layout.appendNewline ();
-
-                old_bucket_index = bucket_index;
-            }
-
-            let item = new EventItem (e);
-            journal_layout.appendItem (item);
-            journal_layout.appendHSpace ();
-        }
-
-        this.layout_done = true;
-    }
-};
-
-
-//*** LayoutByDays ***
-//
-// This takes events as delivered by a Zeitgeist query, and lays them out in a
-// JournalLayout as a timeline:  newer events first, older events last.
-// Events appear grouped by individual days.
-
-function LayoutByDays () {
-    this._init ();
-}
-
-LayoutByDays.prototype = {
-    _init: function () {
-    },
-
-    layoutEvents: function (events, journal_layout) {
-        let last_timestamp = null;
-
-        for (let i = 0; i < events.length; i++) {
-            let e = events[i];
-            let d = new Date (e.timestamp);
-            let need_date_change = false;
-
-            if (!last_timestamp)
-                need_date_change = true;
-            else {
-                let last_date = new Date (last_timestamp);
-
-                if (!(last_date.getFullYear () == d.getFullYear ()
-                      && last_date.getMonth () == d.getMonth ()
-                      && last_date.getDate () == d.getDate ()))
-                    need_date_change = true;
-            }
-
-            if (need_date_change) {
-                let label = d.toLocaleFormat (C_("journal heading date", "%a %Y/%b/%d"));
-                let heading = new HeadingItem (label);
-                log ("heading: " + label);
-
-                if (last_timestamp)
-                    journal_layout.appendNewline (); // i.e. only if this is not the *first* heading in the journal
-
-                journal_layout.appendItem (heading);
-                journal_layout.appendNewline ();
-            }
-
-            last_timestamp = e.timestamp;
-
-            let item = new EventItem (e);
-            journal_layout.appendItem (item);
-            journal_layout.appendHSpace ();
-        }
-    }
-};
-
-
-//*** Filter ***
-//
-// A Filter provides an event template for a Zeitgeist query, a result
-// type (e.g. how results are ordered), and a human-readable name for the filter
-// so that it can be picked in the journal display.
-
-function Filter (name) {
-    this._init (name);
-}
-
-Filter.prototype = {
-    _init: function (name) {
-        this.name = name;
-        this.event_template = null;
-        this.result_type = Zeitgeist.ResultType.MOST_RECENT_SUBJECTS;
-    }
-};
-
-function _makeEmptySubject () {
-    return new Zeitgeist.Subject ("", "", "", "", "", "", ""); // uri, interpretation, manifestation, origin, mimetype, text, storage
-}
-
-function _makeEmptyEventTemplate () {
-    let subject = _makeEmptySubject ();
-    return new Zeitgeist.Event ("", "", "", [subject], []); // interpretation, manifestation, actor, subjects, payload
-}
-
-function EverythingFilter () {
-    this._init ();
-}
-
-EverythingFilter.prototype = {
-    __proto__: Filter.prototype,
-
-    _init: function () {
-        Filter.prototype._init.call(this, _("Everything"));
-        this.event_template = _makeEmptyEventTemplate ();
-    }
-};
-
-function NewFilter () {
-    this._init ();
-}
-
-NewFilter.prototype = {
-    __proto__: Filter.prototype,
-
-    _init: function () {
-        Filter.prototype._init.call(this, _("Newly-created items"));
-        let subject = _makeEmptySubject ();
-        this.event_template = new Zeitgeist.Event (
-            "http://www.zeitgeist-project.com/ontologies/2010/01/27/zg#CreateEvent", // interpretation
-            "", "", [subject], []); // manifestation, actor, subjects, payload
-    },
-};
-
-function FrequentFilter () {
-    this._init ();
-}
-
-FrequentFilter.prototype = {
-    __proto__: Filter.prototype,
-
-    _init: function() {
-        Filter.prototype._init.call(this, _("Frequently-used items"));
-        this.event_template = _makeEmptyEventTemplate ();
-        this.sorting = Zeitgeist.ResultType.MOST_POPULAR_SUBJECTS;
-    },
-};
-
-function FavoritesFilter () {
-    this._init ();
-}
-
-FavoritesFilter.prototype = {
-    __proto__: Filter.prototype,
-
-    _init: function () {
-        Filter.prototype._init.call(this, _("Favorites"));
-        let subject = new Zeitgeist.Subject ("bookmark://", "", "", "", "", "", ""); // uri, interpretation, manifestation, origin, mimetype, text, storage
-        this.event_template =  new Zeitgeist.Event("", "", "", [subject], []); // interpretation, manifestation, actor, subjects, payload
-    },
-};
-
-
 //*** JournalDisplay ***
 //
 // This carries a JournalDisplay.actor, for a timeline view of the user's past activities.
@@ -742,7 +456,7 @@ FavoritesFilter.prototype = {
 // gets an updated view every time accesses the journal from the shell.
 //
 // So far we don't need to install a live monitor on Zeitgeist; the assumption is that
-// if you are in the shell's journal, you cannot interact with your apps anyway and
+// if you are in the shell's journal, you cannot interact with your apps anyway and 
 // thus you cannot create any new Zeitgeist events just yet.
 
 function JournalDisplay () {
@@ -751,110 +465,343 @@ function JournalDisplay () {
 
 JournalDisplay.prototype = {
     _init: function () {
-        this._box = new St.BoxLayout ({ vertical: false,
-                                        style_class: 'all-app' });
-	this.actor = this._box;
-
+        this.box = new St.BoxLayout({ style_class: 'all-app' });
         this._scroll_view = new St.ScrollView ({ x_fill: true,
                                                  y_fill: true,
-					         y_align: St.Align.START,
-					         vfade: true });
-
-        this._currentFilter = null;
-        this._filter_box = new St.BoxLayout({ vertical: true, reactive: true });
-
-        this._box.add (this._scroll_view, { expand: true, y_fill: true, y_align: St.Align.START });
-        this._box.add (this._filter_box, { expand: false, y_fill: false, y_align: St.Align.START });
-
-        this._layout = new JournalLayout ();
-        this._scroll_view.add_actor (this._layout.actor);
-
+                             y_align: St.Align.START,
+                             vfade: true });
+                             
         this._scroll_view.set_policy (Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC);
         this._scroll_view.connect ("notify::mapped", Lang.bind (this, this._scrollViewMapCb));
+        
+        this._layout = new JournalLayout ();
+        this._scroll_view.add_actor (this._layout.actor);
+        
+        this._filters = new St.BoxLayout({ vertical: true, reactive: true });
+        this._scroll_view.add_actor(this._layout.actor, { expand: true, y_fill: true, y_align: St.Align.START });
+        
+        this.box.add(this._scroll_view, { expand: true, y_fill: true, y_align: St.Align.START });
+        this.box.add_actor(this._filters, { expand: false, y_fill: false, y_align: St.Align.START });
+        
+        this.actor = this.box;
+        this._sections = [];
+        this._setFilters();
+        this._selectCategory(1);
+        //this._filters.connect('scroll-event', Lang.bind(this, this._scrollFilter))
+    },
+    
+    _scrollFilter: function(actor, event) {
+        let direction = event.get_scroll_direction();
+        if (direction == Clutter.ScrollDirection.UP)
+            this._selectCategory(Math.max(this._currentCategory - 1, -1))
+        else if (direction == Clutter.ScrollDirection.DOWN)
+            this._selectCategory(Math.min(this._currentCategory + 1, this._sections.length - 1));
+    },
 
-        this._setupFilters ();
+    _selectCategory: function(num) {
+        this._currentCategory = num;
+
+        for (let i = 0; i < this._sections.length; i++) {
+            if (i == num)
+                this._sections[i].add_style_pseudo_class('selected');
+            else
+                this._sections[i].remove_style_pseudo_class('selected');
+        }
+        
+        var b = false
+        if (num > 3) 
+            b= true
+        this._layout._setUpTimeViews(b, this._categories[num])
+    },
+    
+    _setFilters: function ()
+    {   
+        this._counter = 0;
+        this._categories = [];
+        this._addCategory(new NewCategory());
+        this._addCategory(new RecentCategory());
+        this._addCategory(new FrequentCategory());
+        this._addCategory(new StarredCategory());
+        this._addCategory(new SharedCategory());
+        
+        var space = new St.Label ({ text: "",
+                                     style_class: 'journal-heading' });
+        this._filters.add(space, { expand: false, x_fill: false, y_fill: false });
+        
+        this._addCategory(new DocumentsCategory());
+        this._addCategory(new MusicCategory());
+        this._addCategory(new VideosCategory());
+        this._addCategory(new PicturesCategory());
+        this._addCategory(new DownloadsCategory());
+        this._addCategory(new ConversationsCategory());
+        this._addCategory(new MailCategory());
+        this._addCategory(new OtherCategory());
+    },
+    
+    _addCategory: function (category)
+    {
+        let button = new St.Button({ label: GLib.markup_escape_text (category.title, -1),
+                                     style_class: 'app-filter',
+                                     x_align: St.Align.START,
+                                     can_focus: true });
+        this._filters.add(button, { expand: false, x_fill: false, y_fill: false });
+       
+        this._sections[this._counter] = button;
+        
+        var x = this._counter;
+        button.connect('clicked', Lang.bind(this, function() {
+            this._selectCategory(x);
+        }));
+        this._categories.push(category);
+        this._counter = this._counter + 1;
     },
 
     _scrollViewMapCb: function (actor) {
         if (this._scroll_view.mapped)
             this._reload ();
     },
-
-    _selectFilter: function (filter) {
-        // Note that filter.button got added in ::_addFilter(); it's not an intrinsic property of the Filter prototype
-
-        for (let i = 0; i < this._filters.length; i++) {
-            if (this._filters[i] == filter)
-                filter.button.add_style_pseudo_class ("selected");
-            else
-                this._filters[i].button.remove_style_pseudo_class ("selected");
-        }
-
-        this._currentFilter = filter;
-        this._reload ();
+    
+    _reload: function () {
+        this._selectCategory(this._currentCategory)
     },
-
-    _addFilter: function (filter) {
-        this._filters.push (filter);
-        filter.button = new St.Button ({ label: filter.name,
-                                         style_class: 'app-filter',
-                                         x_align: St.Align.START,
-                                         can_focus: true });
-        this._filter_box.add (filter.button, { expand: false, x_fill: false, y_fill: false });
-
-        filter.button.connect ("clicked", Lang.bind (this, function () {
-                this._selectFilter (filter);
-        }));
-    },
-
-    _setupFilters: function () {
-        this._filters = [];
-        
-        let everything = new EverythingFilter ();
-
-        this._addFilter (everything);
-        this._addFilter (new NewFilter ());
-        this._addFilter (new FrequentFilter ());
-        this._addFilter (new FavoritesFilter ());
-        
-        this._selectFilter (everything);
-    },
-
-    _reload : function () {
-				log("got here");
-        this._layout.clear ();
-
-        Zeitgeist.findEvents ([0, 9999999999999],                        // time_range
-                              [this._currentFilter.event_template],      // event_templates
-                              Zeitgeist.StorageState.ANY,                // storage_state - FIXME: should we use AVAILABLE instead?
-                              0,                                         // num_events - 0 for "as many as you can"
-                              this._currentFilter.result_type,           // result_type
-                              Lang.bind (this, function (events) {
-                                             //let l = new LayoutByTimeBuckets ();
-                                             let l = new LayoutByDays ();
-                                             l.layoutEvents (events, this._layout);
-                                         }));
-    }
-
 };
 
-// TODO
-//
-// * Make icons reactive; single-click or right-click to get a Largo-like set of actions; double-click to launch
-//     Open with...
-//     Show in file manager
-//     --------------------
-//     Remove from journal
-//     Move to trash
-//
-// * Sort events when we get them (hmm, maybe Zeitgeist already does that for us)
-//
-// * isearch like in Emacs
-//
-// * Big Fat Eraser mode, like in gnome-activity-journal
+
+/*****************************************************************************/
+
+
+function CategoryInterface(title) {
+    this._init (title);
+}
+
+CategoryInterface.prototype = {
+    _init: function (title) {
+        this.title = title
+        this.func = null
+        this.subCategories = [];
+        this.event_template = null;
+        this.time_range = null;
+        this.sorting = 2;
+    },
+};
+
+
+function NewCategory() {
+    this._init();
+}
+
+NewCategory.prototype = {
+    __proto__: CategoryInterface.prototype,
+    _init: function() {
+        CategoryInterface.prototype._init.call(this, _("New"));
+        let subject = new Zeitgeist.Subject ("", "", "", "", "", "", "");
+        this.event_template = new Zeitgeist.Event(
+            "http://www.zeitgeist-project.com/ontologies/2010/01/27/zg#CreateEvent", 
+            "", "", [subject], []);
+        this.time_range = 60*60*3*1000;
+    },
+};
+
+
+function RecentCategory() {
+    this._init();
+}
+
+RecentCategory.prototype = {
+    __proto__: CategoryInterface.prototype,
+    _init: function() {
+        CategoryInterface.prototype._init.call(this, _("Recently Used"));
+        let subject = new Zeitgeist.Subject ("", "", "", "", "", "", "");
+        this.event_template = new Zeitgeist.Event("", "", "", [subject], []);
+        this.time_range = 86400000*2;
+    },
+};
+
+
+function FrequentCategory() {
+    this._init();
+}
+
+FrequentCategory.prototype = {
+    __proto__: CategoryInterface.prototype,
+    _init: function() {
+        CategoryInterface.prototype._init.call(this, _("Frequent"));
+        let subject = new Zeitgeist.Subject ("", "", "", "", "", "", "");
+        this.event_template = new Zeitgeist.Event("", "", "", [subject], []);
+        this.time_range = 4*86400000;
+        this.sorting = 4;
+    },
+};
+
+
+function StarredCategory() {
+    this._init();
+}
+
+StarredCategory.prototype = {
+    __proto__: CategoryInterface.prototype,
+    _init: function() {
+        CategoryInterface.prototype._init.call(this, _("Starred"));
+        let subject = new Zeitgeist.Subject ("bookmark://", "", "", "", "", "", "");
+        this.event_template =  new Zeitgeist.Event("", "", "", [subject], []);
+        this.time_range = -1;
+    },
+};
+
+
+function SharedCategory() {
+    this._init();
+}
+
+SharedCategory.prototype = {
+    __proto__: CategoryInterface.prototype,
+    _init: function() {
+        CategoryInterface.prototype._init.call(this, _("Shared"));
+        let subject = new Zeitgeist.Subject ("", "", "", "", "", "", "");
+        subject.uri = "file://"+GLib.get_user_special_dir(5)+"/*";
+        this.event_template =  new Zeitgeist.Event("", "", "", [subject], []);
+        this.time_range = -1;
+    },
+};
+
+
+function DocumentsCategory() {
+    this._init();
+}
+
+DocumentsCategory.prototype = {
+    __proto__: CategoryInterface.prototype,
+    _init: function() {
+        CategoryInterface.prototype._init.call(this, _("Documents"));
+        let subject = new Zeitgeist.Subject ("", "", "", "", "", "", "");
+        subject.interpretation = Semantic.NFO_DOCUMENT;
+        this.event_template =  new Zeitgeist.Event("", "", "", [subject], []);
+        this.time_range = -1;
+    },
+};
+
+
+function MusicCategory() {
+    this._init();
+}
+
+MusicCategory.prototype = {
+    __proto__: CategoryInterface.prototype,
+    _init: function() {
+        CategoryInterface.prototype._init.call(this, _("Audio"));
+        let subject = new Zeitgeist.Subject ("", "", "", "", "", "", "");
+        subject.interpretation = Semantic.NFO_AUDIO;
+        this.event_template =  new Zeitgeist.Event("", "", "", [subject], []);
+        this.time_range = -1;
+    },
+};
+
+
+function VideosCategory() {
+    this._init();
+}
+
+VideosCategory.prototype = {
+    __proto__: CategoryInterface.prototype,
+    _init: function() {
+        CategoryInterface.prototype._init.call(this, _("Videos"));
+        let subject = new Zeitgeist.Subject ("", "", "", "", "", "", "");
+        subject.interpretation = Semantic.NFO_VIDEO;
+        this.event_template =  new Zeitgeist.Event("", "", "", [subject], []);
+        this.time_range = -1;
+    },
+};
+
+
+function PicturesCategory() {
+    this._init();
+}
+
+PicturesCategory.prototype = {
+    __proto__: CategoryInterface.prototype,
+    _init: function() {
+        CategoryInterface.prototype._init.call(this, _("Pictures"));
+        let subject = new Zeitgeist.Subject ("", "", "", "", "", "", "");
+        subject.interpretation = Semantic.NFO_IMAGE;
+        this.event_template =  new Zeitgeist.Event("", "", "", [subject], []);
+        this.time_range = -1;
+    },
+};
+
+
+function DownloadsCategory() {
+    this._init();
+}
+
+DownloadsCategory.prototype = {
+    __proto__: CategoryInterface.prototype,
+    _init: function() {
+        CategoryInterface.prototype._init.call(this, _("Downloads"));
+        let subject = new Zeitgeist.Subject ("", "", "", "", "", "", "");
+        subject.uri = "file://"+GLib.get_user_special_dir(2)+"/*";
+        this.event_template =  new Zeitgeist.Event("", "", "", [subject], []);
+        this.time_range = -1;
+    },
+};
+
+
+function ConversationsCategory() {
+    this._init();
+}
+
+ConversationsCategory.prototype = {
+    __proto__: CategoryInterface.prototype,
+    _init: function() {
+        CategoryInterface.prototype._init.call(this, _("Conversations"));
+        let subject = new Zeitgeist.Subject ("", "", "", "", "", "", "");
+        subject.origin = "/org/freedesktop/Telepathy/Account/*"
+        this.event_template =  new Zeitgeist.Event("", "", "", [subject], []);
+        this.time_range = -1;
+    },
+};
+
+
+function MailCategory() {
+    this._init();
+}
+
+MailCategory.prototype = {
+    __proto__: CategoryInterface.prototype,
+    _init: function() {
+        CategoryInterface.prototype._init.call(this, _("Mail Attachments"));
+        let subject = new Zeitgeist.Subject ("", "000", "", "", "", "", "");
+        this.event_template =  new Zeitgeist.Event("", "", "", [subject], []);
+        this.time_range = -1;
+    },
+};
+
+
+function OtherCategory() {
+    this._init();
+}
+
+OtherCategory.prototype = {
+    __proto__: CategoryInterface.prototype,
+    _init: function() {
+        CategoryInterface.prototype._init.call(this, _("Other"));
+        let subjects = []
+        var interpretations = [
+            '!' + Semantic.NFO_IMAGE,
+            '!' + Semantic.NFO_DOCUMENT,
+            '!' + Semantic.NFO_VIDEO,
+            '!' + Semantic.NFO_AUDIO,
+            '!' + Semantic.NMM_MUSIC_PIECE];
+        for (let i = 0; i < interpretations.length; i++) {
+            let subject = new Zeitgeist.Subject('', interpretations[i], '', '', '', '', '');
+            subjects.push(subject);
+        }
+        this.event_template =  new Zeitgeist.Event("", "", "", subjects, []);
+        this.time_range = -1;
+    },
+};
 
 function main(metadata) {
-    imports.gettext.bindtextdomain('gnome-shell-extensions', metadata.localedir);
+	imports.gettext.bindtextdomain('gnome-shell-extensions', metadata.localedir);
 	let journalView = new JournalDisplay();
-	Main.overview.viewSelector.addViewTab('journal', _("Journal"), journalView.actor, 'history');
+	Main.overview.viewSelector.addViewTab('journal', _("Library"), journalView.actor, 'history');
 }
