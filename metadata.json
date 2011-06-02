@@ -1,8 +1,0 @@
-{
- "uuid": "activity-journal@gnome-shell-extensions.gnome.org",
- "name": "activity-journal",
- "description": "Zeitgeist based activity history journal.",
- "shell-version": [ "3.0.1" ],
- "localedir": "/usr/local/share/locale",
- "url": "http://git.gnome.org/gnome-shell-extensions"
-}

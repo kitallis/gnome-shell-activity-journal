@@ -1,3 +1,0 @@
-Make sure you have zeitgeist.js in js/misc/
-> sudo cp -R activity-journal@gnome-shell-extensions.gnome.org/ /usr/local/share/gnome-shell/extensions/
-Then, Alt-f2 --> "r"
