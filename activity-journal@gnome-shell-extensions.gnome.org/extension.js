@@ -25,6 +25,7 @@ const Main = imports.ui.main;
 const GLib = imports.gi.GLib;
 const Gtk = imports.gi.Gtk;
 const Shell = imports.gi.Shell;
+const Gio = imports.gi.Gio
 const Lang = imports.lang;
 const Signals = imports.signals;
 const Search = imports.ui.search;
@@ -35,6 +36,7 @@ const Gettext = imports.gettext.domain('gnome-shell');
 const _ = Gettext.gettext;
 const C_ = Gettext.pgettext;
 
+const AppDisplay = imports.ui.appDisplay;
 const IconGrid = imports.ui.iconGrid;
  
 //*** Semantic-desktop interpretations for various data types ***
@@ -782,8 +784,7 @@ JournalDisplay.prototype = {
         this.box = new St.BoxLayout({ style_class: 'all-app' });
         this._scroll_view = new St.ScrollView ({ x_fill: true,
                                                  y_fill: true,
-                             y_align: St.Align.START,
-                             vfade: true });
+                             y_align: St.Align.START });
                              
         this._scroll_view.set_policy (Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC);
         this._scroll_view.connect ("notify::mapped", Lang.bind (this, this._scrollViewMapCb));
@@ -1114,8 +1115,187 @@ OtherCategory.prototype = {
     },
 };
 
+//*** Zeitgeist Search Providers
+//
+// FIXME: The subject cache is never being emptied.
+let ZeitgeistSubjectCache = {};
+
+function ZeitgeistAsyncSearchProvider(title, interpretations) {
+    this._init(title, interpretations);
+}
+
+ZeitgeistAsyncSearchProvider.prototype = {
+    __proto__: Search.SearchProvider.prototype,
+
+    _init: function(title, interpretations) {
+        Search.SearchProvider.prototype._init.call(this, title);
+        this._buildTemplates(interpretations);
+    },
+
+    _buildTemplates: function(interpretations) {
+        this.templates = [];
+        for (let i = 0; i < interpretations.length; i++) {
+            let subject = new Subject('', interpretations[i], '', '', '', '', '');
+            let event = new Event('', '', '', [subject], []);
+            this.templates.push(event);
+        }
+    },
+
+    _search: function(terms) {
+        this._search_terms = terms;
+        fullTextSearch(terms[0]+'*',
+                                 this.templates,
+                                 Lang.bind(this, function(events) {
+                                     if (terms == this._search_terms)
+                                         this._asyncCallback(events);
+                                 }));
+    },
+
+    _asyncCancelled: function() {
+        this._search_terms = null;
+    },
+
+    getInitialResultSet: function(terms) {
+        this._search(terms);
+        return [];
+    },
+
+    getSubsearchResultSet: function(previousResults, terms) {
+        this.tryCancelAsync();
+        return this.getInitialResultSet(terms);
+    },
+
+    getResultMeta: function(resultId) {
+        return { 'id': ZeitgeistSubjectCache[resultId].uri,
+                 'name': ZeitgeistSubjectCache[resultId].name,
+                 'createIcon': function (size) {
+                                   return ZeitgeistSubjectCache[resultId].createIcon(size);
+                               },
+               };
+    },
+
+    activateResult: function(resultId) {
+        Gio.app_info_launch_default_for_uri(resultId,
+                                            global.create_app_launch_context());
+    },
+
+    _asyncCallback: function(events) {
+        let items = [];
+        for (let i = 0; i < events.length; i++) {
+            let event = events[i];
+            let subject = event.subjects[0];
+            let uri = subject.uri.replace('file://', '');
+            uri = GLib.uri_unescape_string(uri, '');
+            if (GLib.file_test(uri, GLib.FileTest.EXISTS)) {
+                if (!ZeitgeistSubjectCache.hasOwnProperty(subject.uri)) {
+                    let info = new ZeitgeistItemInfo(event);
+                    ZeitgeistSubjectCache[info.uri] = info;
+                }
+                items.push(subject.uri);
+            }
+        }
+        this.addItems(items);
+    }
+};
+
+function DocumentsAsyncSearchProvider() {
+    this._init();
+}
+
+DocumentsAsyncSearchProvider.prototype = {
+    __proto__: ZeitgeistAsyncSearchProvider.prototype,
+
+    _init: function() {
+        let interpretations = [NFO_DOCUMENT];
+        ZeitgeistAsyncSearchProvider.prototype._init.call(this, _("DOCUMENTS"), interpretations);
+    }
+};
+
+function VideosAsyncSearchProvider() {
+    this._init();
+}
+
+VideosAsyncSearchProvider.prototype = {
+    __proto__: ZeitgeistAsyncSearchProvider.prototype,
+
+    _init: function() {
+        let interpretations = [NFO_VIDEO];
+        ZeitgeistAsyncSearchProvider.prototype._init.call(this, _("VIDEOS"), interpretations);
+    }
+};
+
+function MusicAsyncSearchProvider() {
+    this._init();
+}
+
+MusicAsyncSearchProvider.prototype = {
+    __proto__: ZeitgeistAsyncSearchProvider.prototype,
+
+    _init: function() {
+        let interpretations = [
+            NFO_AUDIO,
+            NMM_MUSIC_PIECE];
+        ZeitgeistAsyncSearchProvider.prototype._init.call(this, _("MUSIC"), interpretations);
+    }
+};
+
+function PicturesAsyncSearchProvider() {
+    this._init();
+}
+
+PicturesAsyncSearchProvider.prototype = {
+    __proto__: ZeitgeistAsyncSearchProvider.prototype,
+
+    _init: function() {
+        let interpretations = [NFO_IMAGE];
+        ZeitgeistAsyncSearchProvider.prototype._init.call(this, _("PICTURES"), interpretations);
+    }
+};
+
+function OtherAsyncSearchProvider() {
+    this._init();
+}
+
+OtherAsyncSearchProvider.prototype = {
+    __proto__: ZeitgeistAsyncSearchProvider.prototype,
+
+    _init: function() {
+        let interpretations = [
+            '!' + NFO_IMAGE,
+            '!' + NFO_DOCUMENT,
+            '!' + NFO_VIDEO,
+            '!' + NFO_AUDIO,
+            '!' + NMM_MUSIC_PIECE];
+        ZeitgeistAsyncSearchProvider.prototype._init.call(this, _("OTHER"), interpretations);
+    },
+
+    _buildTemplates: function(interpretations) {
+        // Here we want to get everything matching all of the templates, and
+        // not just any of them. Therefore we need to AND the interpretations
+        // instead of OR'ing them; this is done by having an Event with
+        // different Subjects.
+        this.templates = [];
+        let subjects = [];
+        for (let i = 0; i < interpretations.length; i++) {
+            let subject = new Subject('', interpretations[i], '', '', '', '', '');
+            subjects.push(subject);
+        }
+        let event = new Event('', '', '', subjects, []);
+        this.templates.push(event);
+    }
+};
+
+// Extension main
+
 function main(metadata) {
 	imports.gettext.bindtextdomain('gnome-shell-extensions', metadata.localedir);
+	
 	let journalView = new JournalDisplay();
 	Main.overview.viewSelector.addViewTab('journal', _("Library"), journalView.actor, 'history');
+	
+	Main.overview.viewSelector.addSearchProvider(new DocumentsAsyncSearchProvider());
+	Main.overview.viewSelector.addSearchProvider(new VideosAsyncSearchProvider());
+	Main.overview.viewSelector.addSearchProvider(new MusicAsyncSearchProvider());
+	Main.overview.viewSelector.addSearchProvider(new PicturesAsyncSearchProvider());
+	Main.overview.viewSelector.addSearchProvider(new OtherAsyncSearchProvider());
 }
