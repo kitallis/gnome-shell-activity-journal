@@ -41,3 +41,5 @@ const NMM_ICON                    = "http://www.semanticdesktop.org/ontologies/2
 const NMM_MOVIE                   = "http://www.semanticdesktop.org/ontologies/2009/02/19/nmm#Movie";
 const NMM_MUSIC_PIECE             = "http://www.semanticdesktop.org/ontologies/2009/02/19/nmm#MusicPiece";
 const NMM_TV_SHOW                 = "http://www.semanticdesktop.org/ontologies/2009/02/19/nmm#TVShow";
+
+const NMO_IMMESSAGE               = "http://www.semanticdesktop.org/ontologies/2007/03/22/nmo#IMMessage";

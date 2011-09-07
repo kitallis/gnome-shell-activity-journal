@@ -33,6 +33,7 @@ const Mainloop = imports.mainloop;
 const Gettext = imports.gettext.domain('gnome-shell');
 const _ = Gettext.gettext;
 const C_ = Gettext.pgettext;
+const Tp = imports.gi.TelepathyGLib;
 
 const Extension = imports.ui.extensionSystem.extensions["activity-journal@gnome-shell-extensions.gnome.org"];
 
@@ -131,6 +132,8 @@ JournalLayout.prototype = {
 				this._items.splice(i, 1);
 				if (this._items[i-1].type == "hspace")
 					this._items.splice(i-1, 1);
+				if (this._items[i].type == "hspace")
+					this._items.splice(i, 1);
 				break;
 			}
 		}
@@ -333,6 +336,8 @@ FavoriteItem.prototype = {
             let bookmarkLine = bookmarks[i];
             let components = bookmarkLine.split(' ');
             let bookmark = components[0];
+			if (!bookmark)
+				continue;
             if (bookmark in bookmarksToLabel)
                 continue;
             let label = null;
@@ -352,7 +357,11 @@ FavoriteItem.prototype = {
 	queryBookmarks: function () {
 		// only returns an array of uris
 		// FIXME: handle labels in some manner
-		return this._loadBookmarks ();
+		let bookmarkList = this._loadBookmarks ();
+		if (!bookmarkList)
+			return []
+		else 
+			return bookmarkList;
 	},
 
 	isFavorite: function (uri) {
@@ -429,10 +438,10 @@ EventItem.prototype = {
 		this._closeButton.connect ('clicked', Lang.bind(this, this._removeItem));
 		this._closeButton.connect ('style-changed',
 										 Lang.bind(this, this._onStyleChanged));
-
+	
 		this.actor.add_actor (this._button);
 		this.actor.add_actor (this._closeButton);
-		
+
 		this._closeButton.hide();
 
 		this._idleToggleCloseId = 0;
@@ -443,7 +452,6 @@ EventItem.prototype = {
         this._menuManager = new PopupMenu.PopupMenuManager(this);
 
 		this.multiSelect = multi_select;
-		this._journalLayout = journal_layout;
     },
 
 	_onDestroy: function() {
@@ -479,11 +487,17 @@ EventItem.prototype = {
 		if (elements.length > 1) {
 			for (let i = 0; i < elements.length; i++) {
 				let e = elements[i];
-				e.item.launch ();
+				if (e.item.subject.interpretation == Semantic.NMO_IMMESSAGE)
+					Util.spawn(['empathy', e.item.subject.uri]);
+				else
+					e.item.launch ();
 			}
 			this.multiSelect.destroy ();
 		} else {
-			this._item_info.launch ();
+			if (this._item_info.subject.interpretation == Semantic.NMO_IMMESSAGE)
+				Util.spawn(['empathy', this._item_info.subject.uri]);
+			else
+				this._item_info.launch ();
 			Main.overview.hide ();
 		}
 	},
@@ -511,8 +525,15 @@ EventItem.prototype = {
 	_updatePosition: function () {
         let closeNode = this._closeButton.get_theme_node();
         this._closeButton._overlap = closeNode.get_length('-shell-close-overlap');
-		this._closeButton.x = this._button.width - (this._closeButton.width - 10);
-		this._closeButton.y = -15;
+
+		let [buttonX, buttonY] = this._button.get_position();
+		let [buttonWidth, buttonHeight] = this._button.get_size();
+		
+		buttonWidth = this.actor.scale_x * buttonWidth;
+		buttonHeight = this.actor.scale_y * buttonHeight;
+		
+		this._closeButton.y = buttonY - (this._closeButton.height - this._closeButton._overlap);
+		this._closeButton.x = buttonX + (buttonWidth - this._closeButton._overlap);
 	},
 
     _removeItem: function () {
@@ -594,7 +615,10 @@ ActivityIconMenu.prototype = {
         this._source = source;
 		this._favs = new FavoriteItem ();
 		this._item = this._source._item_info;
-        
+       
+		this._openWith = [];
+		this._openWithItem = [];
+
 		this.connect('activate', Lang.bind(this, this._onActivate));
         this.connect('open-state-changed', Lang.bind(this, this._onOpenStateChanged));
 
@@ -612,16 +636,25 @@ ActivityIconMenu.prototype = {
 
     _redisplay: function() {
         this.removeAll();
-
-		let elements = this._source.multiSelect.querySelections ();
-		if (elements.length < 2 || this._source.multiSelect.isSelected(this._item)) {
-			let apps = Gio.app_info_get_recommended_for_type(this._item.subject.mimetype); 
-			if (apps.length > 0) {	  
-				for (let i = 0; i < apps.length; i++) {
-					this._openWith = this._appendMenuItem(_("Open with " + apps[i].get_name()));
-					this._openWithElement = apps[i];				
-				}
+		let selections = this._source.multiSelect.querySelections ();
+		
+		if (selections.length < 2 || this._source.multiSelect.isSelected(this._item)) {
+			if (this._item.subject.interpretation == Semantic.NMO_IMMESSAGE) {
+				this._startConversation = this._appendMenuItem(_("Start a new conversation"));
+				// dead menu entry, will probably be replaced by an option to launch gnome-contacts 
+				// http://blogs.gnome.org/alexl/2011/06/13/announcing-gnome-contacts/
+				this._previousConversations = this._appendMenuItem(_("Previous conversations"));
 				this._appendSeparator();
+			}
+			else {
+				let apps = Gio.app_info_get_recommended_for_type(this._item.subject.mimetype); 
+				if (apps.length > 0) {	  
+					for (let i = 0; i < apps.length; i++) {
+						this._openWith.push(this._appendMenuItem(_("Open with " + apps[i].get_name())));
+						this._openWithItem.push(apps[i]);
+					}
+					this._appendSeparator();
+				}
 			}
 			let isFavorite = this._favs.isFavorite(this._item.subject.uri);
 			this._toggleFavoriteMenuItem = this._appendMenuItem(isFavorite ? _("Remove from Favorites")
@@ -662,15 +695,15 @@ ActivityIconMenu.prototype = {
     },
 
     _onActivate: function (actor, child) {
-		let elements = this._source.multiSelect.querySelections ();
-		log (elements.length);
+		let selections = this._source.multiSelect.querySelections ();
+		let menuIndex = this._openWith.indexOf(child);
         if (child._window) {
             let metaWindow = child._window;
             this.emit('activate-window', metaWindow);
-        } else if (child == this._openWith) {
-			  this._openWithElement.launch_uris([this._item.subject.uri], null);
+        } else if (menuIndex > -1) {
+			  this._openWithItem[menuIndex].launch_uris([this._item.subject.uri], null);
 		} else if (child == this._launchAllItems) {
-			this._source._launchAll(elements);
+			this._source._launchAll(selections);
 		} else if (child == this._toggleFavoriteMenuItem) {
 			let isFavorite = this._favs.isFavorite(this._item.subject.uri);
 			if (isFavorite) {
@@ -680,10 +713,10 @@ ActivityIconMenu.prototype = {
 				this._favs.append (this._item.subject.uri);
 			}
 		} else if (child == this._showItemInManager) {
-			Util.spawn(['nautilus', this._item.subject.origin]);
+			Util.spawn(['nautilus', this._item.subject.uri]);
 			Main.overview.hide();
 		} else if (child == this._showItemsInManager) {
-			this._launchItemsInManager(elements);
+			this._launchItemsInManager(selections);
 		} else if (child == this._moveFileToTrash) {
 			// remove the item from journal after trashing, it'll be recuperated
 			// as a new event by the Trash filter
@@ -696,12 +729,32 @@ ActivityIconMenu.prototype = {
 			}
 			this._source._removeItem();
 		} else if (child == this._moveFilesToTrash) {
-			this._moveItemsToTrash(elements);
+			this._moveItemsToTrash(selections);
+		} else if (child == this._startConversation) {
+			this._telepathyConversationLaunch(this._item.subject.origin, this._item.subject.uri);
+			//Util.spawn(['empathy', this._item.subject.uri]);
 		}
         this.close();
 		this._source.multiSelect.destroy ();
     },
-	
+
+
+	_telepathyConversationLaunch: function(account_id, contact_id) {
+		let props = {};
+		//let dbus = Tp.DBusDaemon.dup();
+		let account_manager = new Tp.AccountManager.dup();
+
+		let account = account_manager.ensure_account(account_id);
+		
+        props[Tp.PROP_CHANNEL_CHANNEL_TYPE] = Tp.IFACE_CHANNEL_TYPE_TEXT;
+        props[Tp.PROP_CHANNEL_TARGET_HANDLE_TYPE] = Tp.HandleType.CONTACT; 
+        props[Tp.PROP_CHANNEL_TARGET_ID] = contact_id; 
+
+        let req = new Tp.AccountChannelRequest(account, props, global.get_current_time());
+
+        req.ensure_channel_async('', null, null);
+	}, 
+
 	// TOO REDUNDANT FIXME
 
 	_launchItemsInManager: function(elements) {
@@ -779,9 +832,14 @@ function _deleteEvents(subject_text) {
 	return;
 }
 
+function getMethods(obj) {
+	for(var m in obj) {
+		log(m);
+	}
+}
+
 function _deleteArrayElement(array, element) {
 	for (let i = 0; i < array.length; i++) {
-		log (array[i].type + array.length);
 		if (array[i] == element) {
 			array.splice(i, 1);
 			break;
@@ -1063,7 +1121,7 @@ EverythingFilter.prototype = {
                        _makeEmptyEventTemplate (),
                        Zeitgeist.ResultType.MOST_RECENT_SUBJECTS,
                        ALL_THE_TIME,
-                       40,
+                       10,
                        new LayoutByTimeBuckets ())
         ];
     }
@@ -1174,26 +1232,26 @@ FavoritesFilter.prototype = {
 
     _init: function () {
         Filter.prototype._init.call(this, _("Favorites"));
-		this.reload ();
-    },
 
-	reload: function () {
 		let favs = new FavoriteItem ();
 		let uris = favs.queryBookmarks ();
+
 		let event_template = [];
 		for (let i = 0; i < uris.length; i++) {
 			let subject = new Zeitgeist.Subject (uris[i], "", "", "", "", "", "");
 			event_template[i] = new Zeitgeist.Event ("", "", "", [subject], "");
 		}
 
-        this.queries = [
-            new Query (null,
-                       event_template,
-                       Zeitgeist.ResultType.MOST_RECENT_SUBJECTS,
-                       ALL_THE_TIME,
-                       0,
-                       new LayoutByTimeBuckets ())
-        ];
+		if (event_template.length > 0) {
+			this.queries = [
+				new Query (null,
+						  event_template,
+						  Zeitgeist.ResultType.MOST_RECENT_SUBJECTS,
+						  ALL_THE_TIME,
+						  0,
+						  new LayoutByTimeBuckets ())
+			];
+		}
 	}
 		
 };
@@ -1221,16 +1279,17 @@ JournalDisplay.prototype = {
                                         style_class: 'all-app' });
 		this.actor = this._box;
 
-		this._box.connect ('destroy', Lang.bind (this, this._foo));
-
         this._scroll_view = new St.ScrollView ({ x_fill: true,
                                                  y_fill: true,
 					         y_align: St.Align.START,
 					         vfade: true });
 
         this._currentFilter = null;
+        this._currentCategory = 0;
         this._filter_box = new St.BoxLayout({ vertical: true, reactive: true });
 
+        this._filter_box.connect ("scroll-event", Lang.bind(this, this._scrollFilter));
+        
         this._box.add (this._scroll_view, { expand: true, y_fill: true, y_align: St.Align.START });
         this._box.add (this._filter_box, { expand: false, y_fill: false, y_align: St.Align.START });
 
@@ -1239,31 +1298,43 @@ JournalDisplay.prototype = {
         this._scroll_view.set_policy (Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC);
         this._scroll_view.connect ("notify::mapped", Lang.bind (this, this._scrollViewMapCb));
 
-       this._setupFilters ();
+		this._setupFilters ();
     },
-
-	_foo: function() {
-		log ("called");
-	},
 
     _scrollViewMapCb: function (actor) {
         if (this._scroll_view.mapped)
-            this._reload ();
+            this._enableFilter (this._filters[0]); // Select the first filter everytime ScrollView is reloaded
     },
 
-    _selectFilter: function (filter) {
+    _scrollFilter: function (actor, event) {
+        let direction = event.get_scroll_direction();
+        if (direction == Clutter.ScrollDirection.UP)
+            this._enableFilter(this._filters[Math.max(this._currentCategory - 1, 0)])
+        else if (direction == Clutter.ScrollDirection.DOWN)
+            this._enableFilter(this._filters[Math.min(this._currentCategory + 1, this._filters.length - 1)]);
+    },
+
+	_selectFilter: function (filter) {
         // Note that filter.button got added in ::_addFilter(); it's not an intrinsic property of the Filter prototype
 
         for (let i = 0; i < this._filters.length; i++) {
-            if (this._filters[i] == filter)
+            if (this._filters[i] == filter) {
                 filter.button.add_style_pseudo_class ("selected");
-            else
+                this._currentCategory = i;
+            } else
                 this._filters[i].button.remove_style_pseudo_class ("selected");
         }
+	},
 
+    _enableFilter: function (filter) {
+		this._selectFilter (filter);
+		this._loadFilter (filter);
+    },
+
+	_loadFilter: function (filter) {
         this._currentFilter = filter;
         this._reload ();
-    },
+	},
 
     _addFilter: function (filter) {
         this._filters.push (filter);
@@ -1274,9 +1345,20 @@ JournalDisplay.prototype = {
         this._filter_box.add (filter.button, { expand: false, x_fill: false, y_fill: false });
 
         filter.button.connect ("clicked", Lang.bind (this, function () {
-                this._selectFilter (filter);
+				this._reloadFilter (filter, new FavoritesFilter ());
         }));
     },
+
+	// Useful for reloading any 'Filter' that builds a dynamic 'Query'.
+	// Passing null will normally select the filter with the original Query object.
+	_reloadFilter: function (filter, filter_name) {
+		if (filter.name == filter_name.name) {
+			this._selectFilter (filter);
+			this._loadFilter (filter_name);
+		} else {
+			this._enableFilter (filter);
+		}
+	},
 
     _setupFilters: function () {
         this._filters = [];
@@ -1288,14 +1370,15 @@ JournalDisplay.prototype = {
         this._addFilter (new NewFilter ());
         this._addFilter (new FrequentFilter ());
         this._addFilter (new FavoritesFilter ());
-
-        this._addFilter (new ByTypeFilter (_("Documents"), Semantic.NFO_DOCUMENT));
+        	
+		this._addFilter (new ByTypeFilter (_("Conversations"), Semantic.NMO_IMMESSAGE));
+		this._addFilter (new ByTypeFilter (_("Documents"), Semantic.NFO_DOCUMENT));
         this._addFilter (new ByTypeFilter (_("Pictures"), Semantic.NFO_IMAGE));
         this._addFilter (new ByTypeFilter (_("Music"), Semantic.NFO_AUDIO));
         this._addFilter (new ByTypeFilter (_("Videos"), Semantic.NFO_VIDEO));
         // FIXME: add the "other" category
 
-        this._selectFilter (everything);
+        this._enableFilter (everything);
     },
 
     _reload : function () {
@@ -1339,11 +1422,12 @@ JournalDisplay.prototype = {
 };
 
 
+
 function main(metadata) {
 	imports.gettext.bindtextdomain('gnome-shell-extensions', metadata.localedir);
 	  
 	let journalView = new JournalDisplay();
-	Main.overview.viewSelector.addViewTab('journal', _("Recent Activities"), journalView.actor, 'history');
+	Main.overview.viewSelector.addViewTab('journal', _("Journal"), journalView.actor, 'history');
 }
 
 // TODO
